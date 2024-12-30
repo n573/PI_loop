@@ -3,14 +3,60 @@
 #include "hardware/adc.h"
 #include "hardware/pwm.h"
 
-const float V_gain = 1.0, V_offset = 0.0;
-// const float V_ki = 0.00482, V_kp = 0.1; // Initial values for tuning
-const float V_ki = 0.0049, V_kp = 0.11; // Initial values for tuning
-const float setpoint = 1.5; // Desired voltage
-
-// #define WRAP_VAL 832
+// Constants
+#ifndef ADC_RESULT_BITS
+#define ADC_RESULT_BITS (1 << 12)  // 12-bit ADC
+#endif
 #define WRAP_VAL 832
+#define SAMPLE_TIME_MS 10
 #define TRANSLATE_FL_WRAP(value)    (uint16_t)(value*(WRAP_VAL)/3.3f)
+
+const float V_gain = 1.0;//, V_offset = 0.0;
+const float V_ki = 0.00482, V_kp = 0.112;
+const float setpoint = 1.5;
+
+typedef struct {
+    float setpoint;    // Desired value
+    float Verr;        // Error
+    float Vp;          // Proportional term
+    float Vi;          // Integral term
+    float output;      // Control output
+} PIState;
+
+typedef struct {
+    float Kp;          // Proportional gain
+    float Ki;          // Integral gain
+    float Vi_max;      // Maximum integral term
+    float Vi_min;      // Minimum integral term
+} PIParams;
+
+void pi_init(PIState *state, float setpoint) {
+    state->setpoint = setpoint;
+    state->Verr = 0.0f;
+    state->Vp = 0.0f;
+    state->Vi = 0.0f;
+    state->output = 0.0f;
+}
+
+float pi_update(PIState *state, PIParams *params, float measured_value) {
+    // Apply voltage gain to measured value
+    float scaled_value = measured_value * V_gain; //! if you decide to use V_Offset this is where you add it
+    
+    // Calculate error using scaled value
+    state->Verr = state->setpoint - scaled_value;
+
+    // Proportional term
+    state->Vp = params->Kp * state->Verr;
+
+    // Integral term
+    state->Vi += params->Ki * state->Verr;
+    if (state->Vi > params->Vi_max) state->Vi = params->Vi_max;
+    if (state->Vi < params->Vi_min) state->Vi = params->Vi_min;
+
+    // Control output
+    state->output = state->Vp + state->Vi;
+    return state->output;
+}
 
 int main()
 {
@@ -32,39 +78,35 @@ int main()
 
     const float reference_voltage = 3.3f;
     const float conversion_factor = reference_voltage / ADC_RESULT_BITS;
-    const float Vi_max = 3.3; // Maximum value for Vi to prevent windup
-    const float Vi_min = -3.3; // Minimum value for Vi to prevent windup
-    uint16_t duty_cycle;
-    float Verr, Vfb, V, Vp, Vi = 0;
+    // const float Vi_max = 3.3; // Maximum value for Vi to prevent windup
+    // const float Vi_min = -3.3; // Minimum value for Vi to prevent windup
+    const float Vi_max = reference_voltage/1.5; // Maximum value for Vi to prevent windup
+    const float Vi_min = -reference_voltage/1.5; // Minimum value for Vi to prevent windup
+
+    PIState state;
+    PIParams params = {
+        .Kp = V_kp,
+        .Ki = V_ki,
+        .Vi_max = Vi_max,
+        .Vi_min = Vi_min
+    };
+    
+    pi_init(&state, setpoint);
 
     while (true) {
         uint16_t raw = adc_read();
         float voltage = raw * conversion_factor;
         
-        // Calculate error
-        Verr = setpoint - voltage;
+        float control_output = pi_update(&state, &params, voltage);
 
-        // Proportional term
-        Vp = V_kp * Verr;
-
-        // Integral term -- Sums over time (hence, integral)
-        Vi += V_ki * Verr;
-        if (Vi > Vi_max) Vi = Vi_max; // Limit Vi to prevent windup
-        if (Vi < Vi_min) Vi = Vi_min; // Limit Vi to prevent windup
-
-        // Control output
-        V = Vp + Vi;
-
-        // Set PWM duty cycle based on control output
-        uint16_t duty_cycle = TRANSLATE_FL_WRAP(V);
-        if (duty_cycle > WRAP_VAL) duty_cycle = WRAP_VAL; // Limit duty cycle to 100%
-        if (duty_cycle < 0) duty_cycle = 0; // Limit duty cycle to 0%
+        uint16_t duty_cycle = TRANSLATE_FL_WRAP(control_output);
+        if (duty_cycle > WRAP_VAL) duty_cycle = WRAP_VAL;
+        if (duty_cycle < 0) duty_cycle = 0;
         pwm_set_gpio_level(0, duty_cycle);
 
-        // Debug prints
-        printf("Voltage: %.2f V, Error: %.2f, Vp: %.2f, Vi: %.2f, Control Output: %.2f, Duty Cycle: %u\n",
-               voltage, Verr, Vp, Vi, V, duty_cycle);
+        printf("Voltage: %.2f V, Error: %.2f, Vp: %.2f, Vi: %.2f, Output: %.2f, Duty: %u\n",
+               voltage, state.Verr, state.Vp, state.Vi, state.output, duty_cycle);
 
-        sleep_ms(10);
+        sleep_ms(SAMPLE_TIME_MS);
     }
 }
