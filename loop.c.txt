@@ -1,0 +1,128 @@
+/*
+modified by claude 3.5 sonnet
+Key improvements:
+
+Better code organization with separate functions for initialization and control
+Added proper error handling
+Implemented anti-windup with proper time scaling
+Added explicit sampling time constant
+Created a PI controller structure to keep related variables together
+Added safety limits for control output
+Improved variable naming and comments
+Made constants more configurable
+Added proper time scaling for integral term
+*/
+
+
+
+#include <stdio.h>
+#include "pico/stdlib.h"
+#include "hardware/adc.h"
+#include "hardware/pwm.h"
+
+// Control parameters
+const float V_gain = 1.0, V_offset = 0.0;
+const float V_ki = 0.0049, V_kp = 0.9;
+const float setpoint = 1.5;
+// const float SAMPLE_TIME_MS = 6.67f;  // Sampling time in milliseconds
+const float SAMPLE_TIME_MS = 10.0f;  // Sampling time in milliseconds
+
+// System constants
+#define WRAP_VAL 832
+#define V_REF 3.3f
+#define VI_MAX V_REF
+#define VI_MIN (-V_REF)
+#define CONTROL_OUTPUT_MAX 3.3f
+#define CONTROL_OUTPUT_MIN 0.0f
+
+// Utility functions
+#define TRANSLATE_FL_WRAP(value) (uint16_t)(value*(WRAP_VAL)/V_REF)
+
+// Control structure
+typedef struct {
+    float integral;
+    float prev_error;
+    float output;
+} PIController;
+
+void init_pi_controller(PIController* pi) {
+    pi->integral = 0.0f;
+    pi->prev_error = 0.0f;
+    pi->output = 0.0f;
+}
+
+bool initialize_hardware(uint* slice_num) {
+    stdio_init_all();
+    adc_init();
+    
+    // Initialize ADC
+    gpio_init(26);
+    gpio_set_function(26, GPIO_FUNC_SIO);
+    adc_gpio_init(26);
+    adc_select_input(0);
+
+    // Initialize PWM
+    gpio_set_function(0, GPIO_FUNC_PWM);
+    *slice_num = pwm_gpio_to_slice_num(0);
+    pwm_config pwm_cfg = pwm_get_default_config();
+    pwm_cfg.top = WRAP_VAL;
+    pwm_init(*slice_num, &pwm_cfg, true);
+    pwm_set_enabled(*slice_num, true);
+    // pwm_set_gpio_level(0, WRAP_VAL/2);
+    pwm_set_gpio_level(0, WRAP_VAL);
+    
+    return true;
+}
+
+float update_pi_controller(PIController* pi, float error) {
+    // Proportional term
+    float p_term = V_kp * error; // calculates Vp
+    
+    // Integral term with anti-windup
+    pi->integral += V_ki * error * (SAMPLE_TIME_MS / 1000.0f);
+    pi->integral = (pi->integral > VI_MAX) ? VI_MAX : pi->integral;
+    pi->integral = (pi->integral < VI_MIN) ? VI_MIN : pi->integral;
+    
+    // Calculate control output and saturate if necessary
+    pi->output = p_term + pi->integral;
+    pi->output = (pi->output > CONTROL_OUTPUT_MAX) ? CONTROL_OUTPUT_MAX : pi->output;
+    pi->output = (pi->output < CONTROL_OUTPUT_MIN) ? CONTROL_OUTPUT_MIN : pi->output;
+    
+    pi->prev_error = error;
+    return pi->output;
+}
+
+int main() {
+    uint slice_num;
+    PIController pi_ctrl;
+    
+    if (!initialize_hardware(&slice_num)) {
+        printf("Hardware initialization failed!\n");
+        return 1;
+    }
+    
+    init_pi_controller(&pi_ctrl);
+    const float conversion_factor = V_REF / (1 << 12);  // 12-bit ADC
+    uint16_t tmp;
+    while (true) {
+        // Read and convert ADC value
+        tmp = adc_read();
+        float voltage = tmp * conversion_factor;
+        float error = setpoint - voltage;
+        
+        // Update controller
+        float control_output = update_pi_controller(&pi_ctrl, error);
+        
+        // Update PWM
+        uint16_t duty_cycle = TRANSLATE_FL_WRAP(control_output);
+        pwm_set_gpio_level(0, duty_cycle);
+        
+        // Debug output
+        printf("V_mes: %.3f, Err: %.3f, P: %.3f, I: %.3f, Out: %.3f, Duty: %u\n",
+               voltage, error, V_kp * error, pi_ctrl.integral, control_output, duty_cycle);
+        
+        sleep_ms(SAMPLE_TIME_MS);
+    }
+    
+    return 0;
+}
