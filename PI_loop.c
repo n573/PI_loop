@@ -8,6 +8,7 @@ const float V_ki = 0.00482, V_kp = 0.1; // Initial values for tuning
 const float setpoint = 1.5; // Desired voltage
 
 #define WRAP_VAL 832
+#define TRANSLATE_FL_WRAP(value)    (uint16_t)(value*(WRAP_VAL)/3.3f)
 
 int main()
 {
@@ -28,11 +29,9 @@ int main()
     pwm_set_gpio_level(0, WRAP_VAL/2);
 
     const float reference_voltage = 3.3f;
-    // const uint16_t adc_max = (1 << 12) - 1; // 12-bit ADC
-    // const float conversion_factor = reference_voltage / adc_max;
-    
-    const float conversion_factor = reference_voltage / (1<<12);
+    const float conversion_factor = reference_voltage / ADC_RESULT_BITS;
 
+    uint16_t duty_cycle;
     float Verr, Vfb, V, Vp, Vi = 0;
     while (true) {
         uint16_t raw = adc_read();
@@ -55,13 +54,14 @@ int main()
         printf("Vp: %.2f, Vi: %.2f\n", Vp, Vi);
 
         // Set PWM duty cycle based on control output
-        uint16_t duty_cycle = (uint16_t)(V * WRAP_VAL / reference_voltage);
+        // uint16_t duty_cycle = (uint16_t)(V * WRAP_VAL / reference_voltage);
+        duty_cycle = TRANSLATE_FL_WRAP(V);
         if (duty_cycle > WRAP_VAL) duty_cycle = WRAP_VAL; // Limit duty cycle to 100%
         if (duty_cycle < 0) duty_cycle = 0; // Limit duty cycle to 0%
         pwm_set_gpio_level(0, duty_cycle);
 
         // Debug prints
-        printf("ADC Raw: %u, Voltage: %.2f V, Error: %.2f, Vp: %.2f, Vi: %.2f, Control Output: %.2f, Duty Cycle: %u\n",
+        printf("Voltage: %.2f, Error: %.2f, Vp: %.2f, Vi: %.2f, V: %.2f, Duty Cycle: %u\n",
                raw, voltage, Verr, Vp, Vi, V, duty_cycle);
 
         // sleep_ms(100);
